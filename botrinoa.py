@@ -36,7 +36,7 @@ def format_seconds(seconds):
     return f"{minutes} phút {sec} giây" if minutes else f"{sec} giây"
 
 # Error handler
-enasync def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f'Update "{update}" gây lỗi "{context.error}"', exc_info=True)
 
 # Handlers
