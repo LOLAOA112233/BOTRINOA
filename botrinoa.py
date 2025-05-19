@@ -52,9 +52,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Ensure chat dict
     user_dict = data_store.setdefault(chat_id, {})
+    all_buttons = [b for row in buttons for b in row]
 
     # If input is a name (not a button)
-    all_buttons = [b for row in buttons for b in row]
     if text not in all_buttons and len(text) >= 1:
         name = text.upper()
         context.user_data['current_name'] = name
@@ -82,7 +82,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🔙 ĐÃ QUAY LẠI":
         msg = f"🔚 {name} đã kết thúc. Thống kê:\n"
         for action, info in user_data["actions"].items():
-            # Finalize if running
             if info.get("start_time") is not None:
                 duration = (now - info["start_time"]).total_seconds()
                 info.setdefault("durations", []).append(duration)
@@ -101,7 +100,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 warn.append(f"vượt thời gian ({format_seconds(total_time)})")
 
             warning_text = " ⚠️ " + ", ".join(warn) if warn else ""
-
             msg += (
                 f"- {action} lần này: {format_seconds(last_duration)}\n"
                 f"  Tổng thời gian: {format_seconds(total_time)} ({count} lần){warning_text}\n"
@@ -120,7 +118,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_duration": 0
         })
 
-        # If already running
         if info["start_time"] is not None:
             elapsed = (now - info["start_time"]).total_seconds()
             await update.message.reply_text(
@@ -129,7 +126,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Check count
         if info["count"] >= max_counts.get(action, float('inf')):
             await update.message.reply_text(
                 f"⚠️ Bạn đã vượt số lần tối đa cho {action}.",
@@ -137,7 +133,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Start action
         info["count"] += 1
         info["start_time"] = now
         msg = f"{name} đã bắt đầu {action} lúc {now.strftime('%H:%M:%S')}"
@@ -190,40 +185,29 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_store[chat_id] = {}
     await update.message.reply_text("✅ Đã xuất dữ liệu và reset thống kê.")
 
-import os
-import logging
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-
-# --- Giả sử bạn đã định nghĩa các hàm sau ở trên ---
-# async def start(update, context): ...
-# async def handle_message(update, context): ...
-# async def export_data(update, context): ...
-# async def error_handler(update, context): ...
-
 if __name__ == "__main__":
-    # Thiết lập logger
+    # Setup logging
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=logging.INFO
     )
     logger = logging.getLogger(__name__)
 
-    # Lấy token từ biến môi trường
+    # Get token from environment
     TOKEN = os.getenv("TOKEN")
-    # Debug: in tắt token (8 ký tự đầu) để kiểm tra đã lấy đúng chưa
-    logger.info(f"Using token: {TOKEN[:8]}...")
+    if not TOKEN:
+        logger.error("Bot token not found. Please set the TOKEN environment variable.")
+        exit(1)
 
-    # Khởi tạo Application
+    # Debug first part of token without causing error
+    logger.info(f"Using token: {TOKEN[:8] if len(TOKEN) >= 8 else TOKEN}...")
+
+    # Initialize and run bot
     app = ApplicationBuilder().token(TOKEN).build()
-
-    # Đăng ký error handler
     app.add_error_handler(error_handler)
-    # Đăng ký các command/message handler
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Chạy bot
     logger.info("Bot is starting...")
     app.run_polling()
-
