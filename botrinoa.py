@@ -190,14 +190,40 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_store[chat_id] = {}
     await update.message.reply_text("✅ Đã xuất dữ liệu và reset thống kê.")
 
+import os
+import logging
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+
+# --- Giả sử bạn đã định nghĩa các hàm sau ở trên ---
+# async def start(update, context): ...
+# async def handle_message(update, context): ...
+# async def export_data(update, context): ...
+# async def error_handler(update, context): ...
+
 if __name__ == "__main__":
+    # Thiết lập logger
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO
+    )
+    logger = logging.getLogger(__name__)
+
+    # Lấy token từ biến môi trường
     TOKEN = os.getenv("TOKEN")
+    # Debug: in tắt token (8 ký tự đầu) để kiểm tra đã lấy đúng chưa
+    logger.info(f"Using token: {TOKEN[:8]}...")
+
+    # Khởi tạo Application
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # Đăng ký error handler
     app.add_error_handler(error_handler)
+    # Đăng ký các command/message handler
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot is running...")
+    # Chạy bot
+    logger.info("Bot is starting...")
     app.run_polling()
+
