@@ -1,229 +1,229 @@
-import os
-import datetime
 import logging
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime
+from collections import defaultdict
 import pandas as pd
 
-# Logger setup
-def setup_logger():
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
-    )
-    return logging.getLogger(__name__)
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-logger = setup_logger()
+# --- Cấu hình ---
+TOKEN = "7842867457:AAHwUVSHYYPGOd94LJzUxM9JvxImRY7fU6Y"
+ADMIN_IDS = {7272736801}
 
-# Keyboard buttons
-buttons = [
-    ["VỆ SINH 10P", "VỆ SINH 15P"],
-    ["🔙 ĐÃ QUAY LẠI"]
-]
-keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False)
+# Các hành động và giới hạn
+ACTIONS = {
+    "VỆ SINH 10P": {"max_count": 5, "max_minutes": 10},
+    "VỆ SINH 15P": {"max_count": 1, "max_minutes": 15},
+}
 
-# Limits
-time_limits = {"VỆ SINH 10P": 10, "VỆ SINH 15P": 15}
-max_counts = {"VỆ SINH 10P": 5, "VỆ SINH 15P": 1}
+END_ACTION = "🔙 ĐÃ QUAY LẠI"
 
-# In-memory data storage: {chat_id: {name: {actions: {...}}}}
-data_store = {}
+# --- Biến lưu trạng thái và dữ liệu ---
+# user_states lưu hành động đang chạy: key=(chat_id,user_id,name)
+user_states = dict()
+# data_records lưu danh sách hành động đã hoàn thành
+data_records = defaultdict(list)
 
-# Utils
-def format_seconds(seconds):
-    seconds = int(round(seconds))
-    minutes, sec = divmod(seconds, 60)
-    return f"{minutes} phút {sec} giây" if minutes else f"{sec} giây"
+# Lưu tên người dùng đã nhập cho chat+user (để cho phép nhập nhiều tên)
+user_names = defaultdict(set)
 
-# Error handler
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f'Update "{update}" gây lỗi "{context.error}"', exc_info=True)
+# --- Hàm tiện ích ---
+def seconds_to_hms(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h}h {m}p {s}s"
 
-# Handlers
+def get_keyboard():
+    buttons = [[action] for action in ACTIONS.keys()]
+    buttons.append([END_ACTION])
+    buttons.append(["Đổi tên"])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False)
+
+def format_summary(records):
+    if not records:
+        return "Chưa có dữ liệu."
+
+    summary = ""
+    action_summary = defaultdict(list)
+    for action, start, end in records:
+        duration = int((end - start).total_seconds())
+        action_summary[action].append(duration)
+
+    for action, durations in action_summary.items():
+        total_time = seconds_to_hms(sum(durations))
+        count = len(durations)
+        max_limit = ACTIONS.get(action, {}).get("max_minutes", 0)
+        overtime_count = sum(1 for d in durations if d > max_limit * 60)
+        summary += (
+            f"- {action}: Đã làm {count} lần, tổng thời gian {total_time}. "
+            f"Vượt thời gian: {overtime_count} lần.\n"
+        )
+    return summary
+
+# --- Handlers ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Chào bạn! Vui lòng nhập tên của bạn để bắt đầu.",
-        reply_markup=keyboard
+        reply_markup=ReplyKeyboardRemove()
     )
+    context.user_data["awaiting_name"] = True
+    context.user_data["current_name"] = None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     text = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
 
-    # Ensure chat dict
-    user_dict = data_store.setdefault(chat_id, {})
-
-    # If input is a name (not a button)
-    all_buttons = [b for row in buttons for b in row]
-    if text not in all_buttons and len(text) >= 1:
-        name = text.upper()
-        context.user_data['current_name'] = name
-        user_dict.setdefault(name, {"actions": {}})
+    if context.user_data.get("awaiting_name", False):
+        # Đang chờ nhập tên
+        name = text
+        if len(name) < 2:
+            await update.message.reply_text("Tên phải có ít nhất 2 ký tự. Vui lòng nhập lại.")
+            return
+        user_names[(chat_id, user_id)].add(name)
+        context.user_data["current_name"] = name
+        context.user_data["awaiting_name"] = False
         await update.message.reply_text(
-            f"Chào {name}! Bạn có thể chọn mục bên dưới để bắt đầu.",
-            reply_markup=keyboard
+            f"Chào {name}! Bây giờ bạn có thể chọn hành động.",
+            reply_markup=get_keyboard()
         )
         return
 
-    # Must have a name chosen
-    if 'current_name' not in context.user_data:
+    # Nếu chưa có tên thì bắt buộc nhập tên
+    current_name = context.user_data.get("current_name")
+    if not current_name:
+        await update.message.reply_text("Vui lòng nhập tên trước khi chọn hành động. Gõ tên của bạn vào đây.")
+        context.user_data["awaiting_name"] = True
+        return
+
+    key = (chat_id, user_id, current_name)
+
+    if text == "Đổi tên":
+        context.user_data["awaiting_name"] = True
+        context.user_data["current_name"] = None
+        await update.message.reply_text("Vui lòng nhập tên mới:", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if text == END_ACTION:
+        # Kết thúc hành động đang chạy
+        state = user_states.get(key)
+        if not state:
+            await update.message.reply_text(
+                "Bạn chưa bắt đầu hành động nào. Vui lòng chọn hành động.",
+                reply_markup=get_keyboard()
+            )
+            return
+
+        start_time = state["start_time"]
+        end_time = datetime.now()
+        action = state["action"]
+
+        data_records[key].append((action, start_time, end_time))
+        del user_states[key]
+
+        summary = format_summary(data_records[key])
+
         await update.message.reply_text(
-            "Vui lòng nhập tên trước khi thao tác.", reply_markup=keyboard
+            f"Đã kết thúc hành động: {action}.\n\n"
+            f"Tổng kết cho {current_name}:\n{summary}",
+            reply_markup=get_keyboard()
         )
         return
 
-    # Ensure name dict exists
-    name = context.user_data['current_name']
-    user_data = user_dict.setdefault(name, {"actions": {}})
-
-    now = datetime.datetime.now()
-
-    # "🔙 ĐÃ QUAY LẠI" action
-    if text == "🔙 ĐÃ QUAY LẠI":
-        msg = f"🔚 {name} đã kết thúc. Thống kê:\n"
-        for action, info in user_data["actions"].items():
-            # Finalize if running
-            if info.get("start_time") is not None:
-                duration = (now - info["start_time"]).total_seconds()
-                info.setdefault("durations", []).append(duration)
-                info["total_time"] = info.get("total_time", 0) + duration
-                info["last_duration"] = duration
-                info["start_time"] = None
-
-            count = info.get("count", 0)
-            total_time = info.get("total_time", 0)
-            last_duration = info.get("last_duration", 0)
-
-            warn = []
-            if count > max_counts.get(action, count):
-                warn.append(f"vượt số lần ({count}/{max_counts[action]})")
-            if total_time > time_limits.get(action, 0) * 60 * count:
-                warn.append(f"vượt thời gian ({format_seconds(total_time)})")
-
-            warning_text = " ⚠️ " + ", ".join(warn) if warn else ""
-
-            msg += (
-                f"- {action} lần này: {format_seconds(last_duration)}\n"
-                f"  Tổng thời gian: {format_seconds(total_time)} ({count} lần){warning_text}\n"
-            )
-
-        await update.message.reply_text(msg, reply_markup=keyboard)
-        return
-
-    # If action button pressed
-    if text in all_buttons:
-        action = text
-        info = user_data["actions"].setdefault(action, {
-            "count": 0,
-            "total_time": 0.0,
-            "start_time": None,
-            "last_duration": 0
-        })
-
-        # If already running
-        if info["start_time"] is not None:
-            elapsed = (now - info["start_time"]).total_seconds()
+    if text in ACTIONS:
+        # Bắt đầu hành động mới
+        if key in user_states:
             await update.message.reply_text(
-                f"⚠️ Bạn đang thực hiện {action}, đã {format_seconds(elapsed)}.",
-                reply_markup=keyboard
+                f"Bạn đang trong hành động '{user_states[key]['action']}'. Vui lòng kết thúc trước khi bắt đầu hành động mới.",
+                reply_markup=get_keyboard()
             )
             return
 
-        # Check count
-        if info["count"] >= max_counts.get(action, float('inf')):
+        # Kiểm tra số lần đã làm
+        records = data_records.get(key, [])
+        done_count = sum(1 for r in records if r[0] == text)
+        max_count = ACTIONS[text]["max_count"]
+
+        if done_count >= max_count:
             await update.message.reply_text(
-                f"⚠️ Bạn đã vượt số lần tối đa cho {action}.",
-                reply_markup=keyboard
+                f"Bạn đã làm quá số lần cho hành động '{text}' (tối đa {max_count} lần).",
+                reply_markup=get_keyboard()
             )
             return
 
-        # Start action
-        info["count"] += 1
-        info["start_time"] = now
-        msg = f"{name} đã bắt đầu {action} lúc {now.strftime('%H:%M:%S')}"
-        if action in time_limits:
-            msg += f" (Giới hạn {time_limits[action]} phút mỗi lần)."
-        await update.message.reply_text(msg, reply_markup=keyboard)
+        # Lưu trạng thái bắt đầu
+        user_states[key] = {"action": text, "start_time": datetime.now()}
+
+        await update.message.reply_text(
+            f"Bắt đầu hành động '{text}' lúc {user_states[key]['start_time'].strftime('%H:%M:%S')}.\n"
+            f"Bạn đã làm {done_count} lần trước đó (tối đa {max_count} lần).\n"
+            f"Chọn '{END_ACTION}' để kết thúc hành động này.",
+            reply_markup=get_keyboard()
+        )
         return
 
-    # Default fallback
+    # Nếu không hiểu input
     await update.message.reply_text(
-        "Vui lòng nhập tên nếu chưa có hoặc chọn mục bên dưới.",
-        reply_markup=keyboard
+        "Lựa chọn không hợp lệ. Vui lòng nhập tên hoặc chọn hành động bằng nút bên dưới.",
+        reply_markup=get_keyboard()
     )
 
-async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_dict = data_store.get(chat_id, {})
+async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
+        return
+
+    if not data_records:
+        await update.message.reply_text("Chưa có dữ liệu để xuất.")
+        return
+
     rows = []
-    now = datetime.datetime.now()
-
-    for name, user_data in user_dict.items():
-        for action, info in user_data.get("actions", {}).items():
-            if info.get("start_time") is not None:
-                duration = (now - info["start_time"]).total_seconds()
-                info.setdefault("durations", []).append(duration)
-                info["total_time"] += duration
-                info["last_duration"] = duration
-                info["start_time"] = None
-
+    for (chat_id, user_id, name), records in data_records.items():
+        for action, start, end in records:
+            duration = int((end - start).total_seconds())
             rows.append({
-                "Tên nhân viên": name,
-                "Hành động": action,
-                "Số lần": info.get("count", 0),
-                "Tổng thời gian (phút)": round(info.get("total_time", 0) / 60, 1),
-                "Thời gian chi tiết": format_seconds(info.get("total_time", 0)),
-                "Danh sách (phút:giây)": ", ".join(format_seconds(d) for d in info.get("durations", []))
+                "ChatID": chat_id,
+                "UserID": user_id,
+                "Name": name,
+                "Action": action,
+                "Start": start.strftime("%Y-%m-%d %H:%M:%S"),
+                "End": end.strftime("%Y-%m-%d %H:%M:%S"),
+                "Duration(s)": duration,
             })
 
-    if not rows:
-        await update.message.reply_text("Không có dữ liệu để xuất.")
-        return
-
     df = pd.DataFrame(rows)
-    fname = f"data_{chat_id}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
-    df.to_excel(fname, index=False)
+    filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    df.to_excel(filename, index=False)
 
-    with open(fname, "rb") as f:
-        await update.message.reply_document(f)
-    os.remove(fname)
-    data_store[chat_id] = {}
-    await update.message.reply_text("✅ Đã xuất dữ liệu và reset thống kê.")
+    with open(filename, "rb") as f:
+        await update.message.reply_document(document=f, filename=filename)
 
-import os
-import logging
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-
-# --- Giả sử bạn đã định nghĩa các hàm sau ở trên ---
-# async def start(update, context): ...
-# async def handle_message(update, context): ...
-# async def export_data(update, context): ...
-# async def error_handler(update, context): ...
-
-if __name__ == "__main__":
-    # Thiết lập logger
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Dùng /start để bắt đầu.\n"
+        "Nhập tên, rồi chọn hành động.\n"
+        "Chọn '🔙 ĐÃ QUAY LẠI' để kết thúc hành động.\n"
+        "Admin dùng /export để xuất file Excel."
     )
-    logger = logging.getLogger(__name__)
 
-    # Lấy token từ biến môi trường
-    TOKEN = os.getenv("TOKEN")
-    # Debug: in tắt token (8 ký tự đầu) để kiểm tra đã lấy đúng chưa
-    logger.info(f"Using token: {TOKEN[:8]}...")
-
-    # Khởi tạo Application
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Đăng ký error handler
-    app.add_error_handler(error_handler)
-    # Đăng ký các command/message handler
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("export", export_data))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("export", export_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # Chạy bot
-    logger.info("Bot is starting...")
     app.run_polling()
 
+if __name__ == "__main__":
+    main()
